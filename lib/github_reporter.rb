@@ -17,12 +17,12 @@ module GithubReporter
   # @option kwargs [#puts] :buffer defaults to `$stdout`
   #
   # @see REPOSITORIES_TO_QUERY
-  def self.run(since_date:, until_date:, **kwargs)
+  def self.run(since_date:, until_date:, repos:, **kwargs)
     access_token = kwargs.fetch(:access_token) { ENV.fetch("GITHUB_OAUTH_TOKEN") }
     buffer = kwargs.fetch(:buffer) { $stdout }
 
     scope = Scope.new(
-      repository_names: repository_names,
+      repository_names: repos,
       report_since_date: Time.parse("#{since_date}T00:00:00Z"),
       report_until_date: Time.parse("#{until_date}T00:00:00Z")
     )
