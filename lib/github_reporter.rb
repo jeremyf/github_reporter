@@ -155,6 +155,7 @@ module GithubReporter
       render_header
       render_issues_section
       render_pull_requests_section
+      true
     end
 
     private
