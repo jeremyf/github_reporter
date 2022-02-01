@@ -1,8 +1,6 @@
 # frozen_string_literal: true
 
 require_relative "github_reporter/version"
-
-require "forem/github_reporter/version"
 require "octokit"
 require "set"
 require "date"
