@@ -123,10 +123,11 @@ module GithubReporter
         repo = Repository.new(client: client, name: repository_name)
         issues = client.issues(repo.name, state: "closed", sort: "updated", since: scope.report_since_date.iso8601)
         while issues
+          # We need to capture the next HREF  for pagination.
+          href = client.last_response.rels[:next]&.href
           issues.each do |issue|
             next if issue.closed_at < scope.report_since_date
             next if issue.closed_at >= scope.report_until_date
-
             next if issue.user.login == YE_OLE_DEPENDABOT_USERNAME
 
             if issue.pull_request?
@@ -135,7 +136,6 @@ module GithubReporter
               data_store.issues << Issue.build_from(repository: repo, remote: issue)
             end
           end
-          href = client.last_response.rels[:next]&.href
           issues = href ? client.get(href) : nil
         end
       end
@@ -214,4 +214,14 @@ module GithubReporter
       end
     end
   end
+end
+
+File.open("report.md", "w+") do |fbuffer|
+  GithubReporter.run(
+    since_date: "2022-01-01",
+    until_date: "2022-02-01",
+    repos: ["forem/forem", "forem/rfcs"],
+    auth_token: ENV.fetch("GITHUB_OAUTH_TOKEN"),
+    buffer: fbuffer
+  )
 end
