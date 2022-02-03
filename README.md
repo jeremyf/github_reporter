@@ -48,7 +48,7 @@ I could then load the local cached values to run the report:
 ```ruby
 data_store = Marshal.load(File.read("data_store_dump.txt"))
 
-GithubReporter::Reporter.new(data_store: data_store, scope: scope).render
+GithubReporter::Reporter.render(data_store: data_store, scope: scope, format: :csv)
 ```
 
 Alternatively, if you don't want to use caching, you can use the `GithubReporter.run` method:
@@ -58,6 +58,7 @@ GithubReporter.run(
   since_date: "2022-01-01",
   until_date: "2022-02-01",
   repos: ["forem/forem", "forem/rfcs"],
+  format: :csv,
   auth_token: ENV.fetch["GITHUB_OAUTH_TOKEN"],
   buffer: $stdout
 )
@@ -68,12 +69,14 @@ The above will live query Github and render output to given buffer.
 Or if you'd prefer to write to a file:
 
 ```ruby
-File.open("report.md", "w+") do |fbuffer|
+File.open("report.csv", "w+") do |fbuffer|
   GithubReporter.run(
+    format: :csv,
     since_date: "2022-01-01",
     until_date: "2022-02-01",
     repos: ["forem/forem", "forem/rfcs"],
     auth_token: ENV.fetch("GITHUB_OAUTH_TOKEN"),
+	data_store: "data_store.dump",
     buffer: fbuffer
   )
 end

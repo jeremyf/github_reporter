@@ -4,6 +4,7 @@ require_relative "github_reporter/version"
 require "octokit"
 require "set"
 require "date"
+require "csv"
 
 module GithubReporter
   class Error < StandardError; end
@@ -15,11 +16,14 @@ module GithubReporter
   # @param kwargs [Hash]
   # @option kwargs [String] :access_token defaults `ENV.fetch("GITHUB_OAUTH_TOKEN")`
   # @option kwargs [#puts] :buffer defaults to `$stdout`
+  # @option kwargs [Symbol] :format defaults to `:md`
   #
-  # @see REPOSITORIES_TO_QUERY
+  # @see Reporter::FORMATS_MAP for list of valid formats.
+  # @todo Before we go a fetching, validate the format.
   def self.run(since_date:, until_date:, repos:, **kwargs)
     access_token = kwargs.fetch(:access_token) { ENV.fetch("GITHUB_OAUTH_TOKEN") }
     buffer = kwargs.fetch(:buffer) { $stdout }
+    format = kwargs.fetch(:format) { :csv }
 
     scope = Scope.new(
       repository_names: repos,
@@ -30,7 +34,7 @@ module GithubReporter
     fetcher = Fetcher.new(scope: scope, access_token: access_token)
     data_store = fetcher.call
 
-    Reporter.new(data_store: data_store, scope: scope, buffer: buffer).render
+    Reporter.render(data_store: data_store, scope: scope, buffer: buffer, format: format)
   end
 
   # Store only the data that we want.  This also allows for nice and compact Marshaling.
@@ -143,85 +147,186 @@ module GithubReporter
     end
   end
 
-  class Reporter
-    def initialize(data_store:, scope:, buffer: $stdout)
-      @data_store = data_store
-      @visited_pull_requests = Set.new
-      @buffer = buffer
-      @scope = scope
+  module Reporter
+    def self.render(format:, **kwargs)
+      format = FORMATS_MAP.fetch(format) { Csv }
+      format.new(**kwargs).render
     end
 
-    def render
-      render_header
-      render_issues_section
-      render_pull_requests_section
-      true
-    end
-
-    private
-
-    def render_header
-      @buffer.puts "# Issues and Pull Requests Closed\n\n"
-      @buffer.puts "- Run as of #{Time.now.iso8601}\n"
-      @buffer.puts "- From #{@scope.report_since_date.strftime('%Y-%m-%d')} to #{@scope.report_until_date.strftime('%Y-%m-%d')}"
-      @buffer.puts "- Number of Issues Closed: #{@data_store.issues.size}"
-      @buffer.puts "- Number of PR Closed: #{@data_store.pulls.size}\n\n"
-    end
-
-    def render_issues_section
-      @buffer.puts "## Issues Closed\n"
-      @data_store.issues.sort_by(&:number).each do |issue|
-        @buffer.puts "\n### #{issue.title}\n\n"
-        @buffer.puts "- [#{issue.repository_name}##{issue.number}](#{issue.html_url})"
-        @buffer.puts "- Reported by: [#{issue.reporter}](https://github.com/#{issue.reporter})"
-        @buffer.puts "- Created: #{issue.created_at.strftime('%Y-%m-%d')}"
-        @buffer.puts "- Closed: #{issue.closed_at.strftime('%Y-%m-%d')}"
-
-        render_issues_pull_requests_for(issue: issue)
+    class Base
+      def initialize(data_store:, scope:, buffer: $stdout)
+        @data_store = data_store
+        @buffer = buffer
+        @scope = scope
+        @relations = Set.new
       end
-    end
 
-    def render_issues_pull_requests_for(issue:)
-      issue_prs = @data_store.pulls.select { |pr| issue.pull_request_urls.include?(pr.url) }
-      if issue_prs.any?
-        @buffer.puts "- Pull Requests:"
-        issue_prs.each do |pr|
-          @visited_pull_requests << pr
-          @buffer.puts "  - [#{pr.repository_name}##{pr.number}](#{pr.html_url}): #{pr.title}"
+      attr_reader :data_store, :buffer, :scope, :relations
+
+
+      # @note Without a custom inspect, you'd see the @data_store.inspect as part of the output.
+      # That overwhelms the output.
+      def inspect
+        "<##{self.class.name} { object_id: #{object_id} }>"
+      end
+
+      # @abstract
+      # @return true when complete
+      def render
+        raise NotImplementedError
+      end
+
+      protected
+
+      def format_date(date)
+        return "" unless date
+        date.strftime("%Y-%m-%d")
+      end
+
+      def relate_issue_to_prs(issue)
+        issue.pull_request_urls.each do |url|
+          self.relations << Relation.new(issue_url: issue.url, pull_url: url)
         end
       end
-    end
 
-    def visit_pull_request_from_timeframe(url:)
-      pr = @data_store.pulls.detect { |pr| pr.url == url }
-      if pr
-        @visited_pull_requests << pr
-        yield(pr)
+      def issue_urls_for(pull:)
+        relations.select { |rel| rel.pull_url == pull.url }.map(&:issue_url)
       end
     end
 
-    def render_pull_requests_section
-      not_visited = @data_store.pulls - @visited_pull_requests
-      if not_visited.any?
-        @buffer.puts "\n\n## Pull Requests Merged without Corresponding Issue\n"
-        not_visited.sort_by(&:number).each do |pr|
-          @buffer.puts "\n### #{pr.title}\n\n"
-          @buffer.puts "- [#{pr.repository_name}##{pr.number}](#{pr.html_url})"
-          @buffer.puts "- Created: #{pr.created_at.strftime('%Y-%m-%d')}"
-          @buffer.puts "- Closed: #{pr.closed_at.strftime('%Y-%m-%d')}"
-          @buffer.puts "- Submitter: [#{pr.submitter}](https://github.com/#{pr.submitter})"
+    Relation = Struct.new(:issue_url, :pull_url, keyword_init: true)
+
+    class Csv < Base
+      def render
+        csv_string = CSV.generate(force_quotes: true, write_headers: true, headers: CSV_HEADERS) do |csv|
+          push_issues_to(csv: csv)
+          push_pulls_to(csv: csv)
+        end
+        buffer.puts(csv_string)
+        true
+      end
+
+      private
+
+      CSV_HEADERS = ["NUMBER", "TITLE", "TYPE", "CREATED_ON", "CLOSED_ON", "SUBMITTER", "HTML_URL", "REALTED_NUMBERS"]
+
+      def push_issues_to(csv:)
+        data_store.issues.each do |issue|
+          relate_issue_to_prs(issue)
+          csv << [
+            issue.number,
+            issue.title,
+            "Issue",
+            format_date(issue.created_at),
+            format_date(issue.closed_at),
+            issue.reporter,
+            issue.html_url,
+            urls_to_number_cell(urls: issue.pull_request_urls)
+          ]
         end
       end
+
+      def push_pulls_to(csv:)
+        data_store.pulls.each do |pull|
+          csv << [
+            pull.number,
+            pull.title,
+            "Pull Request",
+            format_date(pull.created_at),
+            format_date(pull.closed_at),
+            pull.submitter,
+            pull.html_url,
+            urls_to_number_cell(urls: issue_urls_for(pull: pull))
+          ]
+        end
+      end
+
+
+      def urls_to_number_cell(urls:)
+        return nil if urls.empty?
+
+        # NOTE: By convention, the last slug of Github's pull or issue URLs are the number.
+        numbers = urls.map { |url| url.split("/").last.to_i }
+
+        return numbers.first if numbers.size == 1
+        numbers.join("; ")
+      end
     end
+
+    class Markdown < Base
+      def initialize(...)
+        super(...)
+        @visited_pull_urls = Set.new
+      end
+
+      attr_reader :visited_pull_urls
+
+      def render
+        raise "This is broken, perhaps I'll fix it later.  Use the CSV instead."
+        render_header
+        render_issues_section
+        render_pull_requests_section
+        true
+      end
+
+      private
+
+      def render_header
+        buffer.puts "# Issues and Pull Requests Closed\n\n"
+        buffer.puts "- Run as of #{Time.now.iso8601}\n"
+        buffer.puts "- From #{scope.report_since_date.strftime('%Y-%m-%d')} to #{scope.report_until_date.strftime('%Y-%m-%d')}"
+        buffer.puts "- Number of Issues Closed: #{@data_store.issues.size}"
+        buffer.puts "- Number of PR Closed: #{@data_store.pulls.size}\n\n"
+      end
+
+      def render_issues_section
+        buffer.puts "## Issues Closed\n"
+        data_store.issues.sort_by(&:number).each do |issue|
+          buffer.puts "\n### #{issue.title}\n\n"
+          buffer.puts "- [#{issue.repository_name}##{issue.number}](#{issue.html_url})"
+          buffer.puts "- Reported by: [#{issue.reporter}](https://github.com/#{issue.reporter})"
+          buffer.puts "- Created: #{issue.created_at.strftime('%Y-%m-%d')}"
+          buffer.puts "- Closed: #{issue.closed_at.strftime('%Y-%m-%d')}"
+
+          render_issues_pull_requests_for(issue: issue)
+        end
+      end
+
+      def render_issues_pull_requests_for(issue:)
+        relate_issue_to_prs(issue)
+        pulls.ata_store.pulls.select { |pr| issue.pull_request_urls.include?(pr.url) }
+        if pulls.any?
+          buffer.puts "- Pull Requests:"
+          pulls.each do |pull|
+            buffer.puts "  - [#{pull.repository_name}##{pull.number}](#{pull.html_url}): #{pull.title}"
+          end
+        end
+      end
+      def render_pull_requests_section
+        if not_visited.any?
+          buffer.puts "\n\n## Pull Requests Merged without Corresponding Issue\n"
+          not_visited.sort_by(&:number).each do |pr|
+            buffer.puts "\n### #{pr.title}\n\n"
+            buffer.puts "- [#{pr.repository_name}##{pr.number}](#{pr.html_url})"
+            buffer.puts "- Created: #{pr.created_at.strftime('%Y-%m-%d')}"
+            buffer.puts "- Closed: #{pr.closed_at.strftime('%Y-%m-%d')}"
+            buffer.puts "- Submitter: [#{pr.submitter}](https://github.com/#{pr.submitter})"
+
+            render_pull_requests_issue(pull: pull)
+          end
+        end
+      end
+
+      def render_pull_requests_issue(pull:)
+        issue_urls = issue_urls_for(pull: pull)
+        :todo
+      end
+    end
+
+    FORMATS_MAP = {
+      md: Markdown,
+      markdown: Markdown,
+      csv: Csv,
+    }
   end
-end
-
-File.open("report.md", "w+") do |fbuffer|
-  GithubReporter.run(
-    since_date: "2022-01-01",
-    until_date: "2022-02-01",
-    repos: ["forem/forem", "forem/rfcs"],
-    auth_token: ENV.fetch("GITHUB_OAUTH_TOKEN"),
-    buffer: fbuffer
-  )
 end
