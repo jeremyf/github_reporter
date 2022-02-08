@@ -17,6 +17,7 @@ module GithubReporter
   # @option kwargs [String] :access_token defaults `ENV.fetch("GITHUB_OAUTH_TOKEN")`
   # @option kwargs [#puts] :buffer defaults to `$stdout`
   # @option kwargs [Symbol] :format defaults to `:md`
+  # @option labels_to_report [Array] :labels_to_report an array of label names for reporting columns
   #
   # @see Reporter::FORMATS_MAP for list of valid formats.
   # @todo Before we go a fetching, validate the format.
@@ -24,9 +25,11 @@ module GithubReporter
     access_token = kwargs.fetch(:access_token) { ENV.fetch("GITHUB_OAUTH_TOKEN") }
     buffer = kwargs.fetch(:buffer) { $stdout }
     format = kwargs.fetch(:format) { :csv }
+    labels_to_report = kwargs.fetch(:labels_to_report) { [] }
 
     scope = Scope.new(
       repository_names: repos,
+      labels_to_report: labels_to_report,
       report_since_date: Time.parse("#{since_date}T00:00:00Z"),
       report_until_date: Time.parse("#{until_date}T00:00:00Z")
     )
@@ -43,6 +46,7 @@ module GithubReporter
     :commit_shas,
     :created_at,
     :html_url,
+    :labels,
     :number,
     :pull_request_urls,
     :reporter,
@@ -62,6 +66,7 @@ module GithubReporter
         commit_shas: commit_shas,
         created_at: remote.created_at,
         html_url: remote.html_url,
+        labels: remote.labels.map(&:name),
         number: remote.number,
         pull_request_urls: pull_request_urls,
         reporter: remote.user.login,
@@ -78,6 +83,7 @@ module GithubReporter
     :commit_shas,
     :created_at,
     :html_url,
+    :labels,
     :number,
     :repository_name,
     :submitter,
@@ -94,6 +100,7 @@ module GithubReporter
         commit_shas: commit_shas,
         created_at: remote.created_at,
         html_url: remote.html_url,
+        labels: remote.labels.map(&:name),
         number: remote.number,
         repository_name: repository.name,
         submitter: remote.user.login,
@@ -105,15 +112,15 @@ module GithubReporter
 
   Repository = Struct.new(:client, :name, keyword_init: true)
 
-  Scope = Struct.new(:repository_names, :report_since_date, :report_until_date, keyword_init: true)
+  Scope = Struct.new(:labels_to_report, :repository_names, :report_since_date, :report_until_date, keyword_init: true)
 
-  DataStore = Struct.new(:issues, :pulls, keyword_init: true)
+  DataStore = Struct.new(:issues, :pulls, :labels, keyword_init: true)
 
   class Fetcher
     YE_OLE_DEPENDABOT_USERNAME = "dependabot[bot]".freeze
 
     def initialize(scope:, access_token: ENV.fetch("GITHUB_OAUTH_TOKEN"))
-      @data_store = DataStore.new(issues: Set.new, pulls: Set.new)
+      @data_store = DataStore.new(issues: Set.new, pulls: Set.new, labels: Set.new)
       @client = Octokit::Client.new(
         access_token: access_token,
         per_page: 50
@@ -133,11 +140,14 @@ module GithubReporter
             next if issue.closed_at < scope.report_since_date
             next if issue.closed_at >= scope.report_until_date
             next if issue.user.login == YE_OLE_DEPENDABOT_USERNAME
-
             if issue.pull_request?
-              data_store.pulls << PullRequest.build_from(repository: repo, remote: issue)
+              pull = PullRequest.build_from(repository: repo, remote: issue)
+              data_store.labels += pull.labels
+              data_store.pulls << pull
             else
-              data_store.issues << Issue.build_from(repository: repo, remote: issue)
+              issue = Issue.build_from(repository: repo, remote: issue)
+              data_store.labels += issue.labels
+              data_store.issues << issue
             end
           end
           issues = href ? client.get(href) : nil
@@ -197,8 +207,15 @@ module GithubReporter
     Relation = Struct.new(:issue_url, :pull_url, keyword_init: true)
 
     class Csv < Base
+
+      def initialize(...)
+        super(...)
+        @csv_headers = ["NUMBER", "TITLE", "TYPE", "CREATED_ON", "CLOSED_ON", "SUBMITTER", "HTML_URL", "REALTED_NUMBERS"] + Array(scope.labels_to_report).compact.map { |l| "LABEL '#{l}'"}
+      end
+      attr_reader :csv_headers
+
       def render
-        csv_string = CSV.generate(force_quotes: true, write_headers: true, headers: CSV_HEADERS) do |csv|
+        csv_string = CSV.generate(force_quotes: true, write_headers: true, headers: csv_headers) do |csv|
           push_issues_to(csv: csv)
           push_pulls_to(csv: csv)
         end
@@ -207,8 +224,6 @@ module GithubReporter
       end
 
       private
-
-      CSV_HEADERS = ["NUMBER", "TITLE", "TYPE", "CREATED_ON", "CLOSED_ON", "SUBMITTER", "HTML_URL", "REALTED_NUMBERS"]
 
       def push_issues_to(csv:)
         data_store.issues.each do |issue|
@@ -221,8 +236,8 @@ module GithubReporter
             format_date(issue.closed_at),
             issue.reporter,
             issue.html_url,
-            urls_to_number_cell(urls: issue.pull_request_urls)
-          ]
+            urls_to_number_cell(urls: issue.pull_request_urls),
+          ] + label_columns_for(issue)
         end
       end
 
@@ -237,7 +252,13 @@ module GithubReporter
             pull.submitter,
             pull.html_url,
             urls_to_number_cell(urls: issue_urls_for(pull: pull))
-          ]
+          ] + label_columns_for(pull)
+        end
+      end
+
+      def label_columns_for(node)
+        scope.labels_to_report.map do |label|
+          node.labels.include?(label) ? "true" : ""
         end
       end
 
