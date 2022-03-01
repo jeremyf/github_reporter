@@ -82,6 +82,12 @@ File.open("report.csv", "w+") do |fbuffer|
 end
 ```
 
+And because I've run this a few times, I added a script (which I need to update the dates).
+
+```shell
+$ GITHUB_OAUTH_TOKEN=<YOUR_TOKEN_HERE> bundle exec ruby ./to_run.rb
+```
+
 ## Contributing
 
 Bug reports and pull requests are welcome on GitHub at https://github.com/jeremyf/github_reporter.

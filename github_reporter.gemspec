@@ -35,4 +35,5 @@ Gem::Specification.new do |spec|
   # guide at: https://bundler.io/guides/creating_gem.html
   spec.add_dependency "octokit"
   spec.add_development_dependency "debug", ">= 1.0.0"
+  spec.add_development_dependency "graphql-client"
 end
