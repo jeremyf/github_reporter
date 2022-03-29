@@ -69,15 +69,17 @@ The above will live query Github and render output to given buffer.
 Or if you'd prefer to write to a file:
 
 ```ruby
-File.open("report.csv", "w+") do |fbuffer|
+File.open("report-2022-03.csv", "w+") do |fbuffer|
   GithubReporter.run(
     format: :csv,
-    since_date: "2022-01-01",
-    until_date: "2022-02-01",
+    since_date: "2022-03-01",
+    until_date: "2022-04-01",
     repos: ["forem/forem", "forem/rfcs"],
     auth_token: ENV.fetch("GITHUB_OAUTH_TOKEN"),
-	data_store: "data_store.dump",
-    buffer: fbuffer
+    # This doesn't yet work
+    data_store: "data_store.dump",
+    buffer: fbuffer,
+    labels_to_report: ["changelog: rollup", "changelog: spotlight", "changelog: advance", "changelog: none"]
   )
 end
 ```
