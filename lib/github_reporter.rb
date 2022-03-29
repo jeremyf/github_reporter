@@ -9,7 +9,6 @@ require "csv"
 module GithubReporter
   class Error < StandardError; end
 
-
   # @param since_date [String] "CCYY-MM-DD" format.
   # @param until_date [String] "CCYY-MM-DD" format.
   # @param repos [Array<String>] ["user/repo", "org/repo"]
